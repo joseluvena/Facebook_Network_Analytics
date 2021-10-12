@@ -1,0 +1,722 @@
+---
+title: "IDS 564 Final Project"
+author: "Joseline Tanujaya, Minal Patil"
+date: "4/13/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+## Loading packages
+library(igraph)
+library(broom)
+library(ggplot2)
+library(tidyverse)
+rm(list=ls())  
+##############
+# loading data from fb pages
+fb_edges = "musae_facebook_edges.csv"
+fb_nodes = "musae_facebook_target.csv"
+
+fb_edge_frame = read.csv(fb_edges, header = TRUE, sep = ",")
+fb_node_frame = read.csv(fb_nodes, header = TRUE, sep = ",")
+
+```
+
+## Data Exploration & Pre-processing
+```{r}
+
+# looking at nodes and their attributes
+fb_node_frame
+
+# graph from edges and nodes data frames
+g_fb = graph.data.frame(fb_edge_frame, directed = FALSE, vertices = fb_node_frame)
+
+# no. of edges and vertices
+ecount(g_fb)
+vcount(g_fb)
+
+# how many pages exist per page type
+fb_node_frame %>% group_by(fb_node_frame$page_type) %>% count()
+
+ggplot(fb_node_frame, aes(x=page_type)) + geom_bar(width = 0.5, fill = "sky blue") + xlab("Page type") + ylab("No. of Pages")
+
+```
+
+
+```{r Pre-processing}
+
+# there are some self loops in the data so we simplify the network by removing such edges
+is_simple(g_fb)
+simple_g_fb = igraph::simplify(g_fb)
+is.simple(simple_g_fb)
+ecount(simple_g_fb)
+vcount(simple_g_fb)
+
+# degree distribution of the simplified graph
+plot(degree_distribution(simple_g_fb, cumulative = FALSE), xlab = "Node degree", ylab = "Cumulative frequency")
+title("Degree distribution of Facebook Page-Page Network")
+
+# deleting edges with betweeness less than median of edge betweenness to remove edges which are not significant
+g_final = delete.edges(simple_g_fb, which(edge_betweenness(simple_g_fb)<median(edge.betweenness(simple_g_fb))))
+ecount(g_final)
+vcount(g_final)
+length(which(V(g_final)$page_type=="company"))
+length(which(V(g_final)$page_type=="government"))
+length(which(V(g_final)$page_type=="politician"))
+length(which(V(g_final)$page_type=="tvshow"))
+
+# degree distribution of the final graph
+plot(degree_distribution(g_final, cumulative = FALSE), xlab = "Node degree", ylab = "Cumulative frequency")
+title("Degree distribution of the final Facebook Page-Page Network")
+
+```
+
+
+```{r Network Characteristics}
+
+#Shortest Path between 2 most distant nodes in the network
+diameter(simple_g_fb, directed=F)
+
+#Find how many components are weakly and strongly connected
+is.connected(g_fb, mode=c("weak"))
+is.connected(g_fb, mode=c("strong"))
+g_fb_strong <- clusters(g_fb, mode=c("strong"))
+table(g_fb_strong$csize)
+g_fb_weak <- clusters(g_fb, mode=c("weak"))
+table(g_fb_weak$csize)
+
+#The dataset consists of only 1 giant component
+# Global transitivity of the original network simplified
+transitivity(simple_g_fb)
+
+#Average local Clustering Coefficient
+clustering_i = transitivity(simple_g_fb, "localundirected", isolates="zero" )
+(clustering_avg = mean(clustering_i, na.rm = TRUE )) #find local/individual average
+(clustering_stdev = sd(clustering_i, na.rm = TRUE )) #find local/individual std deviation
+clustering_avg - clustering_stdev #check for 1 std deviation
+
+
+average.path.length(g_fb, directed = FALSE)
+
+edge_density(g_fb, loops = FALSE)
+```
+
+
+```{r Community Detection using Fast Greedy}
+
+page_type <- get.vertex.attribute(simple_g_fb, "page_type")
+
+## Community detection using the Fast Greedy Algorithm
+fb_fast <- fastgreedy.community(simple_g_fb)
+plot(fb_fast, simple_g_fb, vertex.label= NA, vertex.size=2, layout = layout_with_fr)
+title(main = "Simple Graph Community Detection with Fast Greedy", font.main = 2)
+
+
+c.m_fg <- membership(fb_fast)
+
+# Assignment based on page type
+cm_fg_pgtype <- table(c.m_fg, page_type, useNA = c("no"))
+cm_fg_pgtype
+
+# There is apparent concentration of certain types of page in a particular community. For example, in community 1, out of the 4,009 members, 1,317 pages (33%) are government pages and 2,284 (59%) are politicians.
+
+# define function to find community significance
+community.significance.test <- function(graph, vs) {
+  if (is.directed(graph)) stop("This method requires an undirected graph")
+  subgraph <- induced.subgraph(graph, vs)
+  in.degrees <- degree(subgraph)
+  # Total degree among nodes in the vs list, minus the degree within the subgraph 
+  out.degrees <- degree(graph, vs) - in.degrees
+  wilcox.test(in.degrees, out.degrees)
+}
+
+significant_comm_fg = c()
+for(i in 1:nrow(cm_fg_pgtype)){
+  x = community.significance.test(simple_g_fb, V(simple_g_fb)[c.m_fg==i])
+  if (x$p.value < 0.01){
+    #print(i)
+    #print(x)
+    significant_comm_fg <- append(significant_comm_fg, i)
+  }
+}
+
+length(significant_comm_fg) #Out of the 175 communities, 75 of them are statistically significant under the Wilcoxon rank sum test.
+
+#find distribution of page_types in 1 community
+pgtype_prop <- as.data.frame.matrix(cm_fg_pgtype) %>% mutate(
+  prop_company=company/(company+government+politician+tvshow),
+  prop_govt=government/(company+government+politician+tvshow),
+  prop_pol=politician/(company+government+politician+tvshow),
+  prop_tv=tvshow/(company+government+politician+tvshow))
+
+write.csv(pgtype_prop, "pagetype_prop.csv")
+
+#in most communities, the the community is dominated by 1 or 2 major categories. This alludes to a clear segregation between communities.
+```
+
+## Subgraphs
+```{r}
+v_tvshow = V(g_final)[V(g_final)$page_type=="tvshow"]
+v_govt = V(g_final)[V(g_final)$page_type=="government"]
+v_company = V(g_final)[V(g_final)$page_type=="company"]
+v_politician = V(g_final)[V(g_final)$page_type=="politician"]
+
+#Community detection in different page types
+subgraph_tvshow = induced_subgraph(g_final, v_tvshow)
+subgraph_govt = induced_subgraph(g_final, v_govt)
+subgraph_company = induced_subgraph(g_final, v_company)
+subgraph_politician = induced_subgraph(g_final, v_politician)
+
+transitivity(g_final)
+transitivity(subgraph_tvshow)
+transitivity(subgraph_govt)
+transitivity(subgraph_company)
+transitivity(subgraph_politician)
+
+plot(subgraph_tvshow, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("TV shows pages")
+
+plot(subgraph_govt, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("Government pages")
+
+plot(subgraph_company, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("Company pages")
+
+plot(subgraph_politician, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("Politicians pages")
+```
+```{r}
+g1 = fastgreedy.community(subgraph_tvshow, weights=E(subgraph_tvshow)$weight)
+plot(g1, subgraph_tvshow, vertex.size=3, vertex.label= NA)
+title("TV shows pages")
+
+g2 = fastgreedy.community(subgraph_govt, weights=E(subgraph_govt)$weight)
+plot(g2, subgraph_govt, vertex.size=3, vertex.label= NA)
+title("Government pages")
+
+g3 = fastgreedy.community(subgraph_company, weights=E(subgraph_company)$weight)
+plot(g3, subgraph_company, vertex.size=3, vertex.label= NA)
+title("Company pages")
+
+g4 = fastgreedy.community(subgraph_politician, weights=E(subgraph_politician)$weight)
+plot(g4, subgraph_politician, vertex.size=3, vertex.label= NA)
+title("Politicians pages")
+```
+
+
+## pairwise subgraphs
+
+```{r}
+v_tvgovt = V(g_final)[V(g_final)$page_type=="tvshow" | V(g_final)$page_type=="government"]
+v_govtpoli = V(g_final)[V(g_final)$page_type=="government" | V(g_final)$page_type=="politician"]
+v_comptv = V(g_final)[V(g_final)$page_type=="company" | V(g_final)$page_type=="tvshow"]
+v_politv = V(g_final)[V(g_final)$page_type=="politician" | V(g_final)$page_type=="tvshow"]
+v_policomp = V(g_final)[V(g_final)$page_type=="politician" | V(g_final)$page_type=="company"]
+v_govtcomp = V(g_final)[V(g_final)$page_type=="government" | V(g_final)$page_type=="tvshow"]
+
+#Community detection in grade 1A and 1B using fast greedy algorithm
+subgraph_tvgovt1 = induced_subgraph(g_final, v_tvgovt)
+subgraph_tvgovt = delete_vertices(subgraph_tvgovt1, which(degree(subgraph_tvgovt1)==0))
+
+
+subgraph_govtpoli1 = induced_subgraph(g_final, v_govtpoli)
+subgraph_govtpoli = delete_vertices(subgraph_govtpoli1, which(degree(subgraph_govtpoli1)==0))
+
+subgraph_comptv1 = induced_subgraph(g_final, v_comptv)
+subgraph_comptv = delete_vertices(subgraph_comptv1, which(degree(subgraph_comptv1)==0))
+
+subgraph_politv1 = induced_subgraph(g_final, v_politv)
+subgraph_politv = delete_vertices(subgraph_politv1, which(degree(subgraph_politv1)==0))
+
+
+subgraph_policomp1 = induced_subgraph(g_final, v_policomp)
+subgraph_policomp = delete_vertices(subgraph_policomp1, which(degree(subgraph_policomp1)==0))
+
+subgraph_govtcomp1 = induced_subgraph(g_final, v_govtcomp)
+subgraph_govtcomp = delete_vertices(subgraph_govtcomp1, which(degree(subgraph_govtcomp1)==0))
+min(degree(subgraph_govtcomp))
+
+transitivity(g_final)
+transitivity(subgraph_tvgovt)
+transitivity(subgraph_govtpoli)
+transitivity(subgraph_comptv)
+transitivity(subgraph_politv)
+transitivity(subgraph_policomp)
+transitivity(subgraph_govtcomp)
+```
+
+## pairwise subgraphs
+```{r}
+g11 = fastgreedy.community(subgraph_tvgovt, weights=E(subgraph_tvgovt)$weight)
+plot(g11, subgraph_tvgovt, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("TV shows-government pages")
+
+g21 = fastgreedy.community(subgraph_govtpoli, weights=E(subgraph_govtpoli)$weight)
+plot(g21, subgraph_govtpoli, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("Government-politicians pages")
+
+g31 = fastgreedy.community(subgraph_comptv, weights=E(subgraph_comptv)$weight)
+plot(g31, subgraph_comptv, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("Company-tv shows pages")
+
+g41 = fastgreedy.community(subgraph_politv, weights=E(subgraph_politv)$weight)
+plot(g41, subgraph_politv, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("Politicians-tv shows pages")
+
+g51 = fastgreedy.community(subgraph_policomp, weights=E(subgraph_policomp)$weight)
+plot(g51, subgraph_policomp, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("Politicians-company pages")
+
+g61 = fastgreedy.community(subgraph_govtcomp, weights=E(subgraph_govtcomp)$weight)
+plot(g61, subgraph_govtcomp, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("Government-company pages")
+```
+
+```{r}
+g111 = fastgreedy.community(subgraph_tvgovt, weights=E(subgraph_tvgovt)$weight)
+plot(g111, subgraph_tvgovt, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("TV shows-government pages")
+
+g21 = fastgreedy.community(subgraph_govtpoli, weights=E(subgraph_govtpoli)$weight)
+plot(g21, subgraph_govtpoli, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("Government-politicians pages")
+
+g31 = fastgreedy.community(subgraph_comptv, weights=E(subgraph_comptv)$weight)
+plot(g31, subgraph_comptv, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("Company-tv shows pages")
+
+g41 = fastgreedy.community(subgraph_politv, weights=E(subgraph_politv)$weight)
+plot(g41, subgraph_politv, vertex.size=3, vertex.label= NA)
+title("Politicians-tv shows pages")
+
+g51 = fastgreedy.community(subgraph_policomp, weights=E(subgraph_policomp)$weight)
+plot(g51, subgraph_policomp, vertex.size=3, vertex.label= NA)
+title("Politicians-company pages")
+
+g61 = fastgreedy.community(subgraph_govtcomp, weights=E(subgraph_govtcomp)$weight)
+plot(g61, subgraph_govtcomp, vertex.size=3, vertex.label= NA)
+title("Government-company pages")
+```
+
+```{r}
+# loading data from fb pages
+newfb_edges = "reduced_fb_edges.csv"
+newfb_nodes = "reduced_fb_nodes.csv"
+
+newfb_edge_frame = read.csv(newfb_edges, header = TRUE, sep = ",")
+newfb_node_frame = read.csv(newfb_nodes, header = TRUE, sep = ",")
+
+# looking at nodes and their attributes
+newfb_node_frame
+
+# graph from edges and nodes data frames
+newg_fb = graph.data.frame(newfb_edge_frame, directed = FALSE, vertices = newfb_node_frame)
+ecount(newg_fb)
+vcount(newg_fb)
+
+v_gov = V(newg_fb)[V(newg_fb)$page_type == "government"]
+tidy(degree(newg_fb, v = v_gov)) %>% summarise(degree(newg_fb, v = v_gov), v_gov$page_name) %>% arrange(desc(degree(newg_fb, v = v_gov)))
+```
+
+```{r}
+newg_gov = induced.subgraph(newg_fb, v_gov)
+# plots
+
+gov1 = delete.vertices(newg_gov, which(degree(newg_gov)<5))
+min(degree(gov1))
+gov = fastgreedy.community(gov1, weights=E(gov1)$weight)
+
+plot(gov, gov1, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("Government pages")
+
+```
+## Community detection on government pages
+```{r}
+# how many communities?
+c.m1 <- membership(gov)
+
+type = get.vertex.attribute(gov1, "page_name")
+
+gov_comm = table(type, c.m1, useNA = c("no"))
+write_excel_csv(tidy(gov_comm), file = "govt_communities.csv")
+tidy(gov_comm) %>% view()
+```
+
+## tv shows
+```{r}
+v_tv = V(newg_fb)[V(newg_fb)$page_type == "tvshow"]
+# tidy(degree(newg_fb, v = v_gov)) %>% summarise(degree(newg_fb, v = v_gov), v_gov$page_name) %>% arrange(desc(degree(newg_fb, v = v_gov)))
+
+newg_tv = induced.subgraph(newg_fb, v_tv)
+# plots
+
+tv1 = delete.vertices(newg_tv, which(degree(newg_tv)<1))
+min(degree(tv1))
+tv = fastgreedy.community(tv1, weights=E(tv1)$weight)
+
+plot(tv, tv1, vertex.size=3, vertex.label= NA, layout = layout_nicely)
+title("TV show pages")
+
+# how many communities?
+c.m1 <- membership(tv)
+
+type = get.vertex.attribute(tv1, "page_name")
+
+tv_comm = table(type, c.m1, useNA = c("no"))
+write_excel_csv(tidy(tv_comm), file = "tv_communities.csv")
+tidy(tv_comm) %>% view()
+```
+## company
+```{r}
+v_comp = V(newg_fb)[V(newg_fb)$page_type == "company"]
+# tidy(degree(newg_fb, v = v_gov)) %>% summarise(degree(newg_fb, v = v_gov), v_gov$page_name) %>% arrange(desc(degree(newg_fb, v = v_gov)))
+
+newg_comp = induced.subgraph(newg_fb, v_comp)
+# plots
+
+comp1 = delete.vertices(newg_comp, which(degree(newg_comp)<1))
+min(degree(comp1))
+comp = fastgreedy.community(comp1, weights=E(comp1)$weight)
+
+plot(comp, comp1, vertex.size=3, vertex.label= NA, layout = layout_with_kk)
+title("Company pages")
+
+# how many communities?
+c.m1 <- membership(comp)
+
+type = get.vertex.attribute(comp1, "page_name")
+
+comp_comm = table(type, c.m1, useNA = c("no"))
+write_excel_csv(tidy(comp_comm), file = "company_communities.csv")
+# tidy(tv_comm) %>% view()
+```
+
+## politicians
+```{r}
+v_poli = V(newg_fb)[V(newg_fb)$page_type == "politician"]
+# tidy(degree(newg_fb, v = v_gov)) %>% summarise(degree(newg_fb, v = v_gov), v_gov$page_name) %>% arrange(desc(degree(newg_fb, v = v_gov)))
+
+newg_poli = induced.subgraph(newg_fb, v_poli)
+# plots
+
+poli1 = delete.vertices(newg_poli, which(degree(newg_poli)<1))
+min(degree(poli1))
+poli = fastgreedy.community(poli1, weights=E(poli1)$weight)
+
+plot(poli, poli1, vertex.size=3, vertex.label= NA, layout = layout_with_fr)
+title("Politicians pages")
+
+# how many communities?
+c.m1 <- membership(poli)
+
+type = get.vertex.attribute(poli1, "page_name")
+
+poli_comm = table(type, c.m1, useNA = c("no"))
+write_excel_csv(tidy(poli_comm), file = "politicians_communities.csv")
+tidy(poli_comm) %>% view()
+```
+
+```{r Degree distribution log-log plot}
+m1 = log10(seq(1,89))
+
+plot(x = m1, y = degree_distribution(newg_fb, cumulative = FALSE), log = "y", xlab = "degree", ylab = "degree distribution") 
+title("log-log plot Degree distribution of reduced Network")
+```
+
+```{r Preferential/Random Attachment}
+fb_node_frame$degree <- degree(g_fb)
+v_bydegree <- fb_node_frame %>% group_by(degree) %>% tally()
+v_bydegree$tot_degree <- v_bydegree$degree * v_bydegree$n
+cum_bydegree <- cumsum(v_bydegree)
+v_bydegree$cum_n <- cum_bydegree$n
+v_bydegree$cum_totdegree <- cum_bydegree$tot_degree
+
+v_bydegree$Fd <- v_bydegree$cum_n/sum(v_bydegree$n)
+v_bydegree$y <- log(1-v_bydegree$Fd)
+
+#Average Degree is the total number of degree existing in the graph / number of nodes in the graph
+avg_d <- sum(v_bydegree$tot_degree)/sum(v_bydegree$n)
+#m = total num of degrees in graph/(2*t) where t=number of nodes at t.
+m <- avg_d/2
+
+dim(v_bydegree) #233
+
+# Execute  the entire for loop code block together 
+for(i in 1:9) {
+  print(i) 
+  alpha_0<-i/10
+  print("Alpha 0: ")
+  print (alpha_0)
+  lm_model <- lm(v_bydegree$y[1:232]~(log(v_bydegree$degree[1:232] + (2*(alpha_0)*m/(1-alpha_0)))), data=v_bydegree)
+  beta_1 = coefficients(lm_model)[2]
+  alpha_1=2/beta_1+1
+  print("Alpha 1: ")
+  print (alpha_1)
+  # For convenience, you can estimate a series of alpha_1 values within this for loop
+}
+
+alpha0 = c(0.9, 0.99, 0.999, 0.9999)
+for(i in alpha0) {
+  print(i) 
+  alpha_0<-i
+  print("Alpha 0: ")
+  print (alpha_0)
+  lm_model <- lm(v_bydegree$y[1:232]~(log(v_bydegree$degree[1:232] + (2*(alpha_0)*m/(1-alpha_0)))), data=v_bydegree)
+  beta_1 = coefficients(lm_model)[2]
+  alpha_1=2/beta_1+1
+  print("Alpha 1: ")
+  print (alpha_1)
+  # For convenience, you can estimate a series of alpha_1 values within this for loop
+}
+
+```
+
+```{r  betweenness vs transitivity and closeness vs transitivity}
+bet <- betweenness(simple_g_fb)
+bt <- as.data.frame(cbind(clustering_i, bet))
+
+summary(bt)
+reg<-lm(bet ~ clustering_i, data = bt)
+summary(reg)
+plot(bt, ylab = "betweenness", xlab = "clustering coefficient")
+abline(reg)
+
+vbetwn = betweenness(simple_g_fb, v = V(simple_g_fb))
+length(vbetwn)
+# Ebtwness = edge_betweenness(simple_g_fb, e = E(simple_g_fb), directed = FALSE)
+localclust <- transitivity(simple_g_fb, type = c("localundirected"))
+
+
+ggplot(data = NULL, aes(localclust, vbetwn)) + geom_point() + scale_y_continuous(name = "Vertex betweenness vb", trans = "log10") + 
+  scale_x_continuous(name = "Vertex clustering coef") + geom_smooth(method = 'glm') +theme(text = element_text(size = 10))
+
+close <- closeness(simple_g_fb)
+ct <- as.data.frame(cbind(clustering_i, close))
+reg_close <-lm(close ~ clustering_i, data = ct)
+summary(reg_close)
+plot(ct)
+abline(reg_close)
+
+bc <- as.data.frame(cbind(bet, close))
+reg_bc <- lm(close ~ bet, data = bc)
+summary(reg_bc)
+plot(bc)
+abline(reg_bc)
+```
+
+```{r Reduced Graph}
+
+fb_reduced_edges = "reduced_fb_edges.csv"
+fb_reduced_nodes = "reduced_fb_nodes.csv"
+
+fb_edge_reduced = read.csv(fb_edges, header = TRUE, sep = ",")
+fb_node_reduced = read.csv(fb_nodes, header = TRUE, sep = ",")
+
+g_fb_reduced = graph.data.frame(fb_edge_reduced, directed = FALSE, vertices = fb_node_reduced)
+
+#Community Detection using Fast Greedy on reduced graph
+
+page_type_reduced <- get.vertex.attribute(g_fb_reduced, "page_type")
+
+## Community detection using the Fast Greedy Algorithm
+fb_reduced_fast <- fastgreedy.community(g_fb_reduced)
+plot(fb_reduced_fast, g_fb_reduced, vertex.label= NA, vertex.size=2, layout = layout_with_fr)
+title(main = "Fast Greedy on Reduced Graph", font.main = 2)
+
+
+c.m_fg_red <- membership(fb_reduced_fast)
+c.m_fg_red
+
+# Assignment based on page type
+cm_fg_pgtype_red <- table(c.m_fg_red, page_type, useNA = c("no"))
+cm_fg_pgtype_red
+
+# define function to find community significance
+community.significance.test <- function(graph, vs) {
+  if (is.directed(graph)) stop("This method requires an undirected graph")
+  subgraph <- induced.subgraph(graph, vs)
+  in.degrees <- degree(subgraph)
+  # Total degree among nodes in the vs list, minus the degree within the subgraph 
+  out.degrees <- degree(graph, vs) - in.degrees
+  wilcox.test(in.degrees, out.degrees)
+}
+
+
+significant_comm_fg_red = c()
+for(i in 1:nrow(cm_fg_pgtype_red)){
+  x = community.significance.test(g_fb_reduced, V(g_fb_reduced)[c.m_fg==i])
+  if (x$p.value < 0.01){
+    #print(i)
+    #print(x)
+    significant_comm_fg <- append(significant_comm_fg_red, i)
+  }
+}
+
+length(significant_comm_fg_red) 
+
+#find distribution of page_types in 1 community
+pgtype_prop_red <- as.data.frame.matrix(cm_fg_pgtype_red) %>% mutate(
+  prop_company=company/(company+government+politician+tvshow),
+  prop_govt=government/(company+government+politician+tvshow),
+  prop_pol=politician/(company+government+politician+tvshow),
+  prop_tv=tvshow/(company+government+politician+tvshow))
+
+```
+```{r Politicians Community Detection based on House}
+pol_nodes <- read.csv("node_attr_house_subgraph_pol.csv")
+pol_ids <- as.vector(pol_nodes[1])
+pol_subgraph<-induced.subgraph(simple_g_fb, v=unlist(pol_ids))
+
+fb_pol_fast <- fastgreedy.community(pol_subgraph)
+plot(fb_pol_fast, pol_subgraph, vertex.label= NA, vertex.size=2, layout = layout_with_fr)
+title(main = "Fast Greedy on Democrats/Republican Graph", font.main = 2)
+
+
+c.m_fg_pol <- membership(fb_pol_fast)
+c.m_fg_pol
+
+# Assignment based on House
+house <- pol_nodes$House
+cm_fg_house_pol <- table(c.m_fg_pol, house, useNA = c("no"))
+cm_fg_house_pol
+
+```
+
+
+```{r Government by country comm detection}
+gov_country_nodes <- read.csv("node_attr_govt_subgraph_country_2.csv")
+gov_country_ids <- as.vector(gov_country_nodes[1])
+gov_subgraph<-induced.subgraph(simple_g_fb, v=unlist(gov_country_ids))
+
+fb_gov_fast <- fastgreedy.community(gov_subgraph)
+plot(fb_gov_fast, gov_subgraph, vertex.label= NA, vertex.size=2, layout = layout_with_fr)
+title(main = "Fast Greedy on Government (Country) Graph", font.main = 2)
+
+
+c.m_fg_gov <- membership(fb_gov_fast)
+c.m_fg_gov
+
+# Assignment based on House
+country <- gov_country_nodes$country
+cm_fg_country_gov <- table(c.m_fg_gov, country, useNA = c("no"))
+cm_fg_country_gov
+                                 
+                                
+```
+
+```{r}
+############################################################################
+
+## removing edges based on their weights to check the stability
+## defining graph stability as the ratio of standard deviation and mean of the edges strength
+maxedges=ecount(newg_fb)
+fracremove_list=list()
+graphstability_list = list()
+current_graph = list()
+current_graph[[1]] = delete.edges(newg_fb, which.max(E(newg_fb)$weight))
+for (i in seq(2,maxedges)){
+  current_graph[[i]] = delete.edges(current_graph[[i-1]], which.max(E(current_graph[[i-1]])$weight))
+  fracremove_list[[i]] = i/maxedges
+  graphstability_list[[i]] = sd(E(current_graph[[i]])$weight)/mean(E(current_graph[[i]])$weight)
+  
+}
+
+############################################################################
+## removing edges with max betweenness centrality to check the stability
+
+fracremove=list()
+graphstability = list()
+current_graph2 = list()
+current_graph2[[1]] = delete.edges(newg_fb, which.max(edge_density(newg_fb, loops = FALSE)))
+
+for (i in seq(2,maxedges)){
+  current_graph2[[i]] = delete.edges(current_graph2[[i-1]], which.max(edge_betweenness(current_graph2[[i-1]], e= E(current_graph2[[i-1]]), weights = E(current_graph2[[i-1]])$weight)))
+  fracremove[[i]] = i/maxedges
+  graphstability[[i]] = sd(E(current_graph2[[i]])$weight)/mean(E(current_graph2[[i]])$weight)
+}
+
+############################################################################
+## removing edges with min betweenness centrality to check the stability
+
+fracremove2=list()
+graphstability2 = list()
+current_graph3 = list()
+current_graph3[[1]] = delete.edges(newg_fb, which.min(edge_density(newg_fb, loops = FALSE)))
+
+for (i in seq(2,maxedges)){
+  current_graph3[[i]] = delete.edges(current_graph3[[i-1]], which.min(edge_betweenness(current_graph3[[i-1]], e= E(current_graph3[[i-1]]), weights = E(current_graph3[[i-1]])$weight)))
+  fracremove2[[i]] = i/maxedges
+  graphstability2[[i]] = sd(E(current_graph3[[i]])$weight)/mean(E(current_graph3[[i]])$weight)
+}
+
+########## visualizing the stability of the network after removing edges
+## red curve corresponds to removing the low betweenness ties first, and 
+## black curve corresponds to removing the high betweenness ties first
+
+ggplot() +
+  geom_line(data = NULL, aes(x = unlist(fracremove2), y = unlist(graphstability2)), color = 'red') +
+  scale_x_continuous(name = "Fraction of edges removed") + scale_y_continuous(name = "Graph stability") + geom_line(data = NULL, aes(x = unlist(fracremove), y = unlist(graphstability))) +theme(text = element_text(size = 10)) 
+
+# + scale_colour_manual("", breaks = c("removing high strength ties first", "removing high betweenness ties first"), values = c("red", "black"))
+
+# ggplot() + geom_line(data = NULL, aes(x = unlist(fracremove), y = unlist(graphstability)), color = 'red') +theme(text = element_text(size = 20)) + scale_x_continuous(name = "Fraction of edges removed") + scale_y_continuous(name = "Coefficient of variation") 
+
+
+############################################################################
+```
+
+## 
+
+```{r}
+############################################################################
+## removing edges based on their betweenness centrality to check the stability
+
+fracremove=list()
+current_graph2 = list()
+avgpath = list()
+current_graph2[[1]] = delete.edges(newg_fb, which.max(edge_density(newg_fb, loops = FALSE)))
+
+for (i in seq(2,maxedges)){
+  current_graph2[[i]] = delete.edges(current_graph2[[i-1]], which.max(edge_betweenness(current_graph2[[i-1]], e= E(current_graph2[[i-1]]), weights = E(current_graph2[[i-1]])$weight)))
+  fracremove[[i]] = i/maxedges
+  avgpath[[i]] = average.path.length(current_graph2[[i]])
+}
+
+########## visualizing the stability of the network after removing edges
+## red curve corresponds to removing the high strength ties first, and 
+## black curve corresponds to removing the high betweenness ties first
+
+ggplot() + geom_line(data = NULL, aes(x = unlist(fracremove), y = unlist(avgpath)), color = 'red') + scale_x_continuous(name = "Fraction of edges removed based on betw. centrality") + scale_y_continuous(name = "avg. path length") + theme(text = element_text(size = 15))
+
+
+```
+
+```{r Reduced Graph}
+reduced_edges = igraph::as_data_frame(g_fb_reduced, what = "edges")
+#write.csv(reduced_edges,file = file.choose(new = T), row.names = FALSE)
+#write.csv(reduced_edges, "C:\\Users\\minal\\Downloads\\reduced_fb_edges.csv",row.names = FALSE)
+
+
+reduced_vertices = igraph::as_data_frame(g_fb_reduced, what = "vertices")
+#write.csv(reduced_vertices, file = file.choose(new = T),row.names = FALSE)
+
+# loading data from fb pages
+newfb_edges = "reduced_fb_edges.csv"
+newfb_nodes = "reduced_fb_nodes.csv"
+
+newfb_edge_frame = read.csv(newfb_edges, header = TRUE, sep = ",")
+newfb_node_frame = read.csv(newfb_nodes, header = TRUE, sep = ",")
+
+# looking at nodes and their attributes
+newfb_node_frame
+
+# graph from edges and nodes data frames
+newg_fb = graph.data.frame(newfb_edge_frame, directed = FALSE, vertices = newfb_node_frame)
+ecount(newg_fb)
+vcount(newg_fb)
+```
